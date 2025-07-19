@@ -19,6 +19,7 @@ import {
   X,
   Volume2,
   VolumeX,
+  Loader2,
 } from "lucide-react"
 import { useTheme } from "next-themes"
 
@@ -30,22 +31,23 @@ export default function DevVoiceLanding() {
   const [isLoading, setIsLoading] = useState(false)
   const [isSpeaking, setIsSpeaking] = useState(false)
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
+  const [error, setError] = useState("")
   const { theme, setTheme } = useTheme()
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null)
   const audioChunksRef = useRef<Blob[]>([])
   const speechSynthesisRef = useRef<SpeechSynthesisUtterance | null>(null)
 
-  // Initialize speech recognition and synthesis
+  // Check browser support
   useEffect(() => {
-    // Check if browser supports required APIs
     if (!navigator.mediaDevices || !window.SpeechSynthesis) {
-      console.warn("Browser doesn't support required APIs")
+      setError("Your browser doesn't support the required audio features")
     }
   }, [])
 
   const startRecording = async () => {
     try {
+      setError("")
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: {
           sampleRate: 16000,
@@ -70,17 +72,17 @@ export default function DevVoiceLanding() {
 
       mediaRecorder.onstop = async () => {
         const audioBlob = new Blob(audioChunksRef.current, { type: "audio/webm" })
-        await processAudio(audioBlob)
+        await transcribeAudio(audioBlob)
         stream.getTracks().forEach((track) => track.stop())
       }
 
-      mediaRecorder.start(1000) // Collect data every second
+      mediaRecorder.start()
       setIsRecording(true)
       setIsConnected(true)
       setTranscript("Listening...")
     } catch (error) {
       console.error("Error starting recording:", error)
-      setTranscript("Error: Could not access microphone")
+      setError("Could not access microphone. Please check permissions.")
     }
   }
 
@@ -93,77 +95,70 @@ export default function DevVoiceLanding() {
     }
   }
 
-  const processAudio = async (audioBlob: Blob) => {
+  const transcribeAudio = async (audioBlob: Blob) => {
     setIsLoading(true)
+    setError("")
 
     try {
-      // Convert audio to base64 for demo purposes
-      const reader = new FileReader()
-      reader.onloadend = async () => {
-        // Simulate transcription with AssemblyAI
-        await simulateTranscription()
+      const formData = new FormData()
+      formData.append("audio", audioBlob, "recording.webm")
+
+      const response = await fetch("/api/transcribe", {
+        method: "POST",
+        body: formData,
+      })
+
+      if (!response.ok) {
+        throw new Error("Transcription failed")
       }
-      reader.readAsDataURL(audioBlob)
+
+      const data = await response.json()
+
+      if (data.error) {
+        throw new Error(data.error)
+      }
+
+      setTranscript(data.transcript)
+
+      // Generate AI response
+      await generateAIResponse(data.transcript)
     } catch (error) {
-      console.error("Error processing audio:", error)
-      setTranscript("Error processing audio")
+      console.error("Transcription error:", error)
+      setError("Failed to transcribe audio. Please try again.")
       setIsLoading(false)
     }
   }
 
-  const simulateTranscription = async () => {
-    // Simulate realistic transcription delay
-    await new Promise((resolve) => setTimeout(resolve, 1500))
+  const generateAIResponse = async (userMessage: string) => {
+    try {
+      const response = await fetch("/api/chat", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ message: userMessage }),
+      })
 
-    const sampleQuestions = [
-      "How do I implement a binary search algorithm in Python?",
-      "What's the difference between let and const in JavaScript?",
-      "How do I fix a null pointer exception in Java?",
-      "Explain the concept of closures in JavaScript",
-      "How do I create a REST API with Node.js?",
-    ]
-
-    const randomQuestion = sampleQuestions[Math.floor(Math.random() * sampleQuestions.length)]
-    setTranscript(randomQuestion)
-
-    // Generate AI response
-    await generateResponse(randomQuestion)
-  }
-
-  const generateResponse = async (question: string) => {
-    const responses: { [key: string]: string } = {
-      "binary search":
-        "Here's a binary search implementation in Python: def binary_search(arr, target): left, right = 0, len(arr) - 1. While left <= right: mid = (left + right) // 2. If arr[mid] == target: return mid. This algorithm has O(log n) time complexity.",
-      "let and const":
-        "The main differences are: let allows reassignment while const doesn't. Both are block-scoped unlike var. const must be initialized at declaration. Use const by default, let when you need to reassign.",
-      "null pointer":
-        "Null pointer exceptions occur when you try to use a reference that points to no location in memory. To fix: check if object is null before using it, initialize objects properly, and use Optional in Java 8+.",
-      closures:
-        "A closure is when an inner function has access to variables from its outer function's scope even after the outer function returns. This creates a persistent scope chain that's useful for data privacy and callbacks.",
-      "REST API":
-        "To create a REST API with Node.js: install Express, set up routes for GET, POST, PUT, DELETE operations, use middleware for parsing JSON, implement error handling, and connect to a database like MongoDB or PostgreSQL.",
-    }
-
-    let aiResponse = "I can help you with that coding question. "
-
-    // Find matching response based on keywords
-    for (const [key, value] of Object.entries(responses)) {
-      if (question.toLowerCase().includes(key)) {
-        aiResponse = value
-        break
+      if (!response.ok) {
+        throw new Error("Failed to generate response")
       }
+
+      const data = await response.json()
+
+      if (data.error) {
+        throw new Error(data.error)
+      }
+
+      setResponse(data.response)
+      setIsLoading(false)
+
+      // Speak the response
+      speakResponse(data.response)
+    } catch (error) {
+      console.error("AI response error:", error)
+      setError("Failed to generate AI response. Please try again.")
+      setIsLoading(false)
     }
-
-    if (aiResponse === "I can help you with that coding question. ") {
-      aiResponse +=
-        "This is a great programming question. Let me break it down for you with a clear explanation and code examples."
-    }
-
-    setResponse(aiResponse)
-    setIsLoading(false)
-
-    // Speak the response
-    speakResponse(aiResponse)
   }
 
   const speakResponse = (text: string) => {
@@ -198,6 +193,13 @@ export default function DevVoiceLanding() {
     } else {
       startRecording()
     }
+  }
+
+  const clearSession = () => {
+    setTranscript("")
+    setResponse("")
+    setError("")
+    stopSpeaking()
   }
 
   return (
@@ -293,7 +295,8 @@ export default function DevVoiceLanding() {
               <div className="text-center mb-8">
                 <h2 className="text-2xl font-bold mb-4">Try DevVoice Live</h2>
                 <p className="text-muted-foreground mb-6">
-                  Click the microphone and ask a coding question to experience real-time voice assistance
+                  Click the microphone and ask a coding question to experience real-time voice assistance powered by
+                  AssemblyAI and OpenAI
                 </p>
 
                 {/* Voice Control Buttons */}
@@ -303,8 +306,15 @@ export default function DevVoiceLanding() {
                     variant={isRecording ? "destructive" : "default"}
                     className="w-20 h-20 rounded-full relative"
                     onClick={toggleRecording}
+                    disabled={isLoading}
                   >
-                    {isRecording ? <MicOff className="w-8 h-8" /> : <Mic className="w-8 h-8" />}
+                    {isLoading ? (
+                      <Loader2 className="w-8 h-8 animate-spin" />
+                    ) : isRecording ? (
+                      <MicOff className="w-8 h-8" />
+                    ) : (
+                      <Mic className="w-8 h-8" />
+                    )}
                     {isConnected && (
                       <div className="absolute -top-1 -right-1 w-4 h-4 bg-green-500 rounded-full animate-pulse"></div>
                     )}
@@ -320,16 +330,38 @@ export default function DevVoiceLanding() {
                       <VolumeX className="w-6 h-6" />
                     </Button>
                   )}
+
+                  {(transcript || response) && (
+                    <Button
+                      size="lg"
+                      variant="outline"
+                      className="w-16 h-16 rounded-full bg-transparent"
+                      onClick={clearSession}
+                    >
+                      <X className="w-6 h-6" />
+                    </Button>
+                  )}
                 </div>
 
                 <div className="flex justify-center items-center gap-2 text-sm text-muted-foreground mb-6">
                   <div className={`w-2 h-2 rounded-full ${isConnected ? "bg-green-500" : "bg-gray-400"}`}></div>
-                  <span>{isConnected ? "Connected & Listening" : "Click microphone to start"}</span>
+                  <span>
+                    {isLoading ? "Processing..." : isConnected ? "Connected & Listening" : "Click microphone to start"}
+                  </span>
                 </div>
               </div>
 
+              {/* Error Display */}
+              {error && (
+                <div className="mb-6">
+                  <div className="bg-destructive/10 border border-destructive/20 rounded-lg p-4">
+                    <p className="text-destructive text-sm">{error}</p>
+                  </div>
+                </div>
+              )}
+
               {/* Transcript Display */}
-              {transcript && (
+              {transcript && transcript !== "Listening..." && transcript !== "Processing..." && (
                 <div className="mb-6">
                   <div className="bg-muted rounded-lg p-4">
                     <div className="flex items-start space-x-3">
@@ -351,11 +383,13 @@ export default function DevVoiceLanding() {
                   <div className="bg-muted rounded-lg p-4">
                     <div className="flex items-center space-x-3">
                       <div className="w-8 h-8 bg-gradient-to-r from-blue-500 to-purple-600 rounded-full flex items-center justify-center flex-shrink-0">
-                        <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
+                        <Loader2 className="w-4 h-4 text-white animate-spin" />
                       </div>
                       <div>
                         <p className="font-medium">DevVoice is thinking...</p>
-                        <p className="text-sm text-muted-foreground">Processing your question</p>
+                        <p className="text-sm text-muted-foreground">
+                          {transcript === "Processing..." ? "Transcribing audio..." : "Generating response..."}
+                        </p>
                       </div>
                     </div>
                   </div>
@@ -383,7 +417,7 @@ export default function DevVoiceLanding() {
                             </Badge>
                           )}
                         </div>
-                        <p className="text-foreground leading-relaxed">{response}</p>
+                        <p className="text-foreground leading-relaxed whitespace-pre-wrap">{response}</p>
                       </div>
                     </div>
                   </div>
@@ -451,7 +485,8 @@ export default function DevVoiceLanding() {
               </CardHeader>
               <CardContent>
                 <p className="text-muted-foreground">
-                  DevVoice transcribes your voice using AssemblyAI and sends it to GPT-4 for intelligent analysis
+                  DevVoice transcribes your voice using AssemblyAI and sends it to Cohere's Command-R-Plus model for
+                  intelligent analysis
                 </p>
               </CardContent>
             </Card>
@@ -477,9 +512,10 @@ export default function DevVoiceLanding() {
       <section className="py-20">
         <div className="container mx-auto px-4 sm:px-6 lg:px-8">
           <div className="text-center mb-16">
-            <h2 className="text-3xl sm:text-4xl font-bold mb-4">Powered by AssemblyAI</h2>
+            <h2 className="text-3xl sm:text-4xl font-bold mb-4">Powered by AssemblyAI & Cohere</h2>
             <p className="text-xl text-muted-foreground max-w-2xl mx-auto">
-              DevVoice uses AssemblyAI's streaming transcription for real-time voice processing with high accuracy
+              DevVoice combines AssemblyAI's real-time transcription with Cohere's powerful language model for
+              intelligent coding assistance
             </p>
           </div>
 
@@ -487,36 +523,28 @@ export default function DevVoiceLanding() {
             <Card className="p-6">
               <div className="bg-slate-900 rounded-lg p-6 overflow-x-auto">
                 <pre className="text-green-400 text-sm">
-                  <code>{`import { AssemblyAI } from 'assemblyai'
-import recorder from 'node-record-lpcm16'
+                  <code>{`// AssemblyAI Integration
+import { AssemblyAI } from 'assemblyai'
 
 const client = new AssemblyAI({
-  apiKey: "your-api-key"
+  apiKey: process.env.ASSEMBLYAI_API_KEY
 });
 
-const transcriber = client.streaming.transcriber({
-  sampleRate: 16_000,
-  formatTurns: true
+// Transcribe audio
+const transcript = await client.transcripts.transcribe({
+  audio: audioFile,
+  speech_model: 'best'
 });
 
-transcriber.on("turn", (turn) => {
-  if (turn.transcript) {
-    console.log("Transcript:", turn.transcript);
-    // Send to AI for processing
-    processWithAI(turn.transcript);
-  }
-});
+// Cohere Integration
+import { generateText } from 'ai'
+import { cohere } from '@ai-sdk/cohere'
 
-await transcriber.connect();
-const recording = recorder.record({
-  channels: 1,
-  sampleRate: 16_000,
-  audioType: "wav"
-});
-
-// Stream audio to AssemblyAI
-Readable.toWeb(recording.stream())
-  .pipeTo(transcriber.stream());`}</code>
+const { text } = await generateText({
+  model: cohere('command-r-plus'),
+  prompt: transcript.text,
+  system: "You are DevVoice, an AI coding assistant..."
+});`}</code>
                 </pre>
               </div>
             </Card>
@@ -634,11 +662,12 @@ Readable.toWeb(recording.stream())
             <h2 className="text-3xl sm:text-4xl font-bold mb-8">About DevVoice</h2>
             <p className="text-xl text-muted-foreground mb-8">
               DevVoice is built by developers for developers. With ultra-fast streaming speech-to-text from AssemblyAI
-              and natural code support from GPT-4, it creates a voice-first coding experience you never knew you needed.
+              and intelligent responses from OpenAI GPT-4, it creates a voice-first coding experience you never knew you
+              needed.
             </p>
             <div className="flex flex-wrap justify-center gap-4 text-sm text-muted-foreground">
               <Badge variant="secondary">AssemblyAI</Badge>
-              <Badge variant="secondary">GPT-4</Badge>
+              <Badge variant="secondary">Cohere Command-R-Plus</Badge>
               <Badge variant="secondary">Node.js</Badge>
               <Badge variant="secondary">React</Badge>
               <Badge variant="secondary">TailwindCSS</Badge>
