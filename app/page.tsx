@@ -28,6 +28,8 @@ export default function DevVoiceLanding() {
   const [isConnected, setIsConnected] = useState(false)
   const [transcript, setTranscript] = useState("")
   const [response, setResponse] = useState("")
+  const [highlightedResponse, setHighlightedResponse] = useState("")
+  const [currentWordIndex, setCurrentWordIndex] = useState(-1)
   const [isLoading, setIsLoading] = useState(false)
   const [isSpeaking, setIsSpeaking] = useState(false)
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
@@ -37,6 +39,7 @@ export default function DevVoiceLanding() {
   const mediaRecorderRef = useRef<MediaRecorder | null>(null)
   const audioChunksRef = useRef<Blob[]>([])
   const speechSynthesisRef = useRef<SpeechSynthesisUtterance | null>(null)
+  const wordsRef = useRef<string[]>([])
 
   // Check browser support
   useEffect(() => {
@@ -48,41 +51,98 @@ export default function DevVoiceLanding() {
   const startRecording = async () => {
     try {
       setError("")
+
+      // Check for microphone permission first
+      const permissionStatus = await navigator.permissions.query({ name: "microphone" as PermissionName })
+      if (permissionStatus.state === "denied") {
+        throw new Error("Microphone access denied. Please enable microphone permissions.")
+      }
+
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: {
-          sampleRate: 16000,
+          sampleRate: 44100, // Higher sample rate for better quality
           channelCount: 1,
           echoCancellation: true,
           noiseSuppression: true,
+          autoGainControl: true,
         },
       })
 
+      // Check if MediaRecorder supports webm
+      let mimeType = "audio/webm;codecs=opus"
+      if (!MediaRecorder.isTypeSupported(mimeType)) {
+        mimeType = "audio/webm"
+        if (!MediaRecorder.isTypeSupported(mimeType)) {
+          mimeType = "audio/mp4"
+          if (!MediaRecorder.isTypeSupported(mimeType)) {
+            mimeType = "" // Let browser choose
+          }
+        }
+      }
+
+      console.log("Using MIME type:", mimeType)
+
       const mediaRecorder = new MediaRecorder(stream, {
-        mimeType: "audio/webm;codecs=opus",
+        mimeType: mimeType || undefined,
       })
 
       mediaRecorderRef.current = mediaRecorder
       audioChunksRef.current = []
 
       mediaRecorder.ondataavailable = (event) => {
+        console.log("Data available:", event.data.size)
         if (event.data.size > 0) {
           audioChunksRef.current.push(event.data)
         }
       }
 
       mediaRecorder.onstop = async () => {
-        const audioBlob = new Blob(audioChunksRef.current, { type: "audio/webm" })
+        console.log("Recording stopped, chunks:", audioChunksRef.current.length)
+
+        if (audioChunksRef.current.length === 0) {
+          setError("No audio data recorded. Please try again.")
+          setIsLoading(false)
+          return
+        }
+
+        const audioBlob = new Blob(audioChunksRef.current, {
+          type: mimeType || "audio/webm",
+        })
+
+        console.log("Created blob:", audioBlob.size, audioBlob.type)
+
         await transcribeAudio(audioBlob)
         stream.getTracks().forEach((track) => track.stop())
       }
 
-      mediaRecorder.start()
+      mediaRecorder.onerror = (event) => {
+        console.error("MediaRecorder error:", event)
+        setError("Recording failed. Please try again.")
+        setIsLoading(false)
+      }
+
+      mediaRecorder.start(1000) // Collect data every second
       setIsRecording(true)
       setIsConnected(true)
       setTranscript("Listening...")
+
+      console.log("Recording started")
     } catch (error) {
       console.error("Error starting recording:", error)
-      setError("Could not access microphone. Please check permissions.")
+
+      let errorMessage = "Could not access microphone."
+
+      if (error instanceof Error) {
+        if (error.message.includes("Permission denied") || error.message.includes("denied")) {
+          errorMessage = "Microphone access denied. Please enable microphone permissions and refresh the page."
+        } else if (error.message.includes("not found") || error.message.includes("NotFoundError")) {
+          errorMessage = "No microphone found. Please connect a microphone and try again."
+        } else {
+          errorMessage = `Microphone error: ${error.message}`
+        }
+      }
+
+      setError(errorMessage)
     }
   }
 
@@ -100,22 +160,57 @@ export default function DevVoiceLanding() {
     setError("")
 
     try {
+      console.log("Starting transcription with blob:", {
+        size: audioBlob.size,
+        type: audioBlob.type,
+      })
+
+      // Check if blob is too small
+      if (audioBlob.size < 1000) {
+        throw new Error("Recording is too short. Please speak for at least 1 second.")
+      }
+
       const formData = new FormData()
-      formData.append("audio", audioBlob, "recording.webm")
+
+      // Convert webm to a more compatible format if needed
+      let audioFile: File
+      if (audioBlob.type.includes("webm")) {
+        // Create a proper file with webm extension
+        audioFile = new File([audioBlob], "recording.webm", {
+          type: "audio/webm;codecs=opus",
+        })
+      } else {
+        audioFile = new File([audioBlob], "recording.wav", {
+          type: "audio/wav",
+        })
+      }
+
+      formData.append("audio", audioFile)
+
+      console.log("Sending transcription request...")
 
       const response = await fetch("/api/transcribe", {
         method: "POST",
         body: formData,
       })
 
+      console.log("Transcription response status:", response.status)
+
       if (!response.ok) {
-        throw new Error("Transcription failed")
+        const errorData = await response.json().catch(() => ({}))
+        console.error("Transcription API error:", errorData)
+        throw new Error(errorData.error || `HTTP ${response.status}: ${response.statusText}`)
       }
 
       const data = await response.json()
+      console.log("Transcription result:", data)
 
       if (data.error) {
         throw new Error(data.error)
+      }
+
+      if (!data.transcript || data.transcript.trim() === "") {
+        throw new Error("No speech was detected. Please try speaking more clearly.")
       }
 
       setTranscript(data.transcript)
@@ -124,7 +219,24 @@ export default function DevVoiceLanding() {
       await generateAIResponse(data.transcript)
     } catch (error) {
       console.error("Transcription error:", error)
-      setError("Failed to transcribe audio. Please try again.")
+
+      let errorMessage = "Failed to transcribe audio. Please try again."
+
+      if (error instanceof Error) {
+        if (error.message.includes("too short")) {
+          errorMessage = error.message
+        } else if (error.message.includes("No speech")) {
+          errorMessage = error.message
+        } else if (error.message.includes("network") || error.message.includes("fetch")) {
+          errorMessage = "Network error. Please check your connection and try again."
+        } else if (error.message.includes("API key")) {
+          errorMessage = "Service configuration error. Please contact support."
+        } else {
+          errorMessage = `Transcription failed: ${error.message}`
+        }
+      }
+
+      setError(errorMessage)
       setIsLoading(false)
     }
   }
@@ -152,8 +264,8 @@ export default function DevVoiceLanding() {
       setResponse(data.response)
       setIsLoading(false)
 
-      // Speak the response
-      speakResponse(data.response)
+      // Speak the response with highlighting
+      speakResponseWithHighlighting(data.response)
     } catch (error) {
       console.error("AI response error:", error)
       setError("Failed to generate AI response. Please try again.")
@@ -161,19 +273,154 @@ export default function DevVoiceLanding() {
     }
   }
 
-  const speakResponse = (text: string) => {
+  const speakResponseWithHighlighting = (text: string) => {
     if ("speechSynthesis" in window) {
       // Cancel any ongoing speech
       window.speechSynthesis.cancel()
 
-      const utterance = new SpeechSynthesisUtterance(text)
-      utterance.rate = 0.9
-      utterance.pitch = 1
-      utterance.volume = 0.8
+      // Get available voices - wait for voices to load if needed
+      let voices = speechSynthesis.getVoices()
 
-      utterance.onstart = () => setIsSpeaking(true)
-      utterance.onend = () => setIsSpeaking(false)
-      utterance.onerror = () => setIsSpeaking(false)
+      // If no voices loaded yet, wait for them
+      if (voices.length === 0) {
+        speechSynthesis.addEventListener("voiceschanged", () => {
+          voices = speechSynthesis.getVoices()
+        })
+      }
+
+      // Enhanced female voice detection
+      const findFemaleVoice = (voiceList: SpeechSynthesisVoice[]) => {
+        // Priority 1: Explicitly named female voices
+        const explicitFemaleVoices = voiceList.filter(
+          (voice) =>
+            voice.name.toLowerCase().includes("female") ||
+            voice.name.toLowerCase().includes("woman") ||
+            voice.name.toLowerCase().includes("lady"),
+        )
+
+        // Priority 2: Known high-quality female voices by name
+        const knownFemaleVoices = voiceList.filter((voice) => {
+          const name = voice.name.toLowerCase()
+          return (
+            // Windows voices
+            name.includes("zira") ||
+            name.includes("hazel") ||
+            name.includes("susan") ||
+            // macOS voices
+            name.includes("samantha") ||
+            name.includes("karen") ||
+            name.includes("victoria") ||
+            name.includes("allison") ||
+            name.includes("ava") ||
+            name.includes("susan") ||
+            // Google voices
+            name.includes("google us english female") ||
+            name.includes("google uk english female") ||
+            // Other common female names
+            name.includes("anna") ||
+            name.includes("emma") ||
+            name.includes("sarah") ||
+            name.includes("lisa") ||
+            name.includes("maria") ||
+            name.includes("julie") ||
+            name.includes("amy") ||
+            name.includes("claire") ||
+            name.includes("helen")
+          )
+        })
+
+        // Priority 3: Voices that typically sound female (higher pitch indicators)
+        const likelyFemaleVoices = voiceList.filter((voice) => {
+          const name = voice.name.toLowerCase()
+          return (
+            name.includes("soprano") ||
+            name.includes("alto") ||
+            (name.includes("voice") && name.includes("2")) || // Often female variants
+            (name.includes("voice") && name.includes("b")) // Often female variants
+          )
+        })
+
+        // Return the best available female voice
+        if (explicitFemaleVoices.length > 0) {
+          return explicitFemaleVoices[0]
+        }
+        if (knownFemaleVoices.length > 0) {
+          return knownFemaleVoices[0]
+        }
+        if (likelyFemaleVoices.length > 0) {
+          return likelyFemaleVoices[0]
+        }
+
+        return null
+      }
+
+      const femaleVoice = findFemaleVoice(voices)
+
+      // Split text into words for highlighting
+      const words = text.split(" ")
+      wordsRef.current = words
+      setCurrentWordIndex(-1)
+      setHighlightedResponse("")
+
+      const utterance = new SpeechSynthesisUtterance(text)
+
+      // Configure voice settings for female voice
+      if (femaleVoice) {
+        utterance.voice = femaleVoice
+        utterance.rate = 0.85 // Slightly slower for clarity
+        utterance.pitch = 1.2 // Higher pitch for female voice
+        utterance.volume = 0.9
+        console.log("Using female voice:", femaleVoice.name)
+      } else {
+        // Fallback settings to make default voice sound more feminine
+        utterance.rate = 0.8
+        utterance.pitch = 1.3 // Higher pitch as fallback
+        utterance.volume = 0.8
+        console.log("No female voice found, using default with higher pitch")
+      }
+
+      // Rest of the highlighting logic remains the same
+      let wordIndex = 0
+      const wordDuration = (text.length / words.length) * 100
+
+      utterance.onstart = () => {
+        setIsSpeaking(true)
+
+        const highlightInterval = setInterval(() => {
+          if (wordIndex < words.length && isSpeaking) {
+            setCurrentWordIndex(wordIndex)
+
+            const highlightedText = words
+              .map((word, index) => {
+                if (index < wordIndex) {
+                  return word
+                } else if (index === wordIndex) {
+                  return word
+                } else {
+                  return word
+                }
+              })
+              .join(" ")
+
+            setHighlightedResponse(highlightedText)
+            wordIndex++
+          } else {
+            clearInterval(highlightInterval)
+          }
+        }, wordDuration)
+      }
+
+      utterance.onend = () => {
+        setIsSpeaking(false)
+        setCurrentWordIndex(-1)
+        setHighlightedResponse("")
+      }
+
+      utterance.onerror = () => {
+        setIsSpeaking(false)
+        setCurrentWordIndex(-1)
+        setHighlightedResponse("")
+      }
 
       speechSynthesisRef.current = utterance
       window.speechSynthesis.speak(utterance)
@@ -184,6 +431,8 @@ export default function DevVoiceLanding() {
     if ("speechSynthesis" in window) {
       window.speechSynthesis.cancel()
       setIsSpeaking(false)
+      setCurrentWordIndex(-1)
+      setHighlightedResponse("")
     }
   }
 
@@ -198,8 +447,38 @@ export default function DevVoiceLanding() {
   const clearSession = () => {
     setTranscript("")
     setResponse("")
+    setHighlightedResponse("")
+    setCurrentWordIndex(-1)
     setError("")
     stopSpeaking()
+  }
+
+  // Render response with word highlighting
+  const renderHighlightedText = (text: string, currentIndex: number) => {
+    if (!isSpeaking || currentIndex === -1) {
+      return <span>{text}</span>
+    }
+
+    const words = text.split(" ")
+    return (
+      <span>
+        {words.map((word, index) => (
+          <span
+            key={index}
+            className={`${
+              index === currentIndex
+                ? "bg-blue-200 dark:bg-blue-800 px-1 rounded"
+                : index < currentIndex
+                  ? "text-muted-foreground"
+                  : ""
+            }`}
+          >
+            {word}
+            {index < words.length - 1 ? " " : ""}
+          </span>
+        ))}
+      </span>
+    )
   }
 
   return (
@@ -226,13 +505,9 @@ export default function DevVoiceLanding() {
               <a href="#about" className="text-sm font-medium hover:text-primary transition-colors">
                 About
               </a>
-              <a href="#docs" className="text-sm font-medium hover:text-primary transition-colors">
-                Docs
-              </a>
               <Button variant="ghost" size="sm" onClick={() => setTheme(theme === "dark" ? "light" : "dark")}>
                 {theme === "dark" ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
               </Button>
-              <Button>Get Started</Button>
             </div>
 
             {/* Mobile menu button */}
@@ -259,10 +534,6 @@ export default function DevVoiceLanding() {
                 <a href="#about" className="text-sm font-medium hover:text-primary transition-colors">
                   About
                 </a>
-                <a href="#docs" className="text-sm font-medium hover:text-primary transition-colors">
-                  Docs
-                </a>
-                <Button className="w-full">Get Started</Button>
               </div>
             </div>
           )}
@@ -296,7 +567,7 @@ export default function DevVoiceLanding() {
                 <h2 className="text-2xl font-bold mb-4">Try DevVoice Live</h2>
                 <p className="text-muted-foreground mb-6">
                   Click the microphone and ask a coding question to experience real-time voice assistance powered by
-                  AssemblyAI and OpenAI
+                  AssemblyAI and Cohere AI
                 </p>
 
                 {/* Voice Control Buttons */}
@@ -396,7 +667,7 @@ export default function DevVoiceLanding() {
                 </div>
               )}
 
-              {/* AI Response */}
+              {/* AI Response with Highlighting */}
               {response && (
                 <div className="mb-6">
                   <div className="bg-gradient-to-r from-blue-50 to-purple-50 dark:from-blue-950/20 dark:to-purple-950/20 rounded-lg p-4 border">
@@ -417,7 +688,9 @@ export default function DevVoiceLanding() {
                             </Badge>
                           )}
                         </div>
-                        <p className="text-foreground leading-relaxed whitespace-pre-wrap">{response}</p>
+                        <p className="text-foreground leading-relaxed whitespace-pre-wrap">
+                          {renderHighlightedText(response, currentWordIndex)}
+                        </p>
                       </div>
                     </div>
                   </div>
@@ -662,8 +935,8 @@ const { text } = await generateText({
             <h2 className="text-3xl sm:text-4xl font-bold mb-8">About DevVoice</h2>
             <p className="text-xl text-muted-foreground mb-8">
               DevVoice is built by developers for developers. With ultra-fast streaming speech-to-text from AssemblyAI
-              and intelligent responses from OpenAI GPT-4, it creates a voice-first coding experience you never knew you
-              needed.
+              and intelligent responses from Cohere's Command-R-Plus model, it creates a voice-first coding experience
+              you never knew you needed.
             </p>
             <div className="flex flex-wrap justify-center gap-4 text-sm text-muted-foreground">
               <Badge variant="secondary">AssemblyAI</Badge>
@@ -689,8 +962,10 @@ const { text } = await generateText({
               </div>
               <p className="text-sm text-muted-foreground mb-4">Code smarter. Speak naturally.</p>
               <div className="flex space-x-4">
-                <Button variant="ghost" size="sm">
-                  <Github className="w-4 h-4" />
+                <Button variant="ghost" size="sm" asChild>
+                  <a href="https://github.com/extinctsion/devoice" target="_blank" rel="noopener noreferrer">
+                    <Github className="w-4 h-4" />
+                  </a>
                 </Button>
                 <Button variant="ghost" size="sm">
                   <Twitter className="w-4 h-4" />
@@ -714,16 +989,6 @@ const { text } = await generateText({
                     Use Cases
                   </a>
                 </li>
-                <li>
-                  <a href="#" className="hover:text-foreground transition-colors">
-                    Demo
-                  </a>
-                </li>
-                <li>
-                  <a href="#" className="hover:text-foreground transition-colors">
-                    Changelog
-                  </a>
-                </li>
               </ul>
             </div>
 
@@ -736,18 +1001,13 @@ const { text } = await generateText({
                   </a>
                 </li>
                 <li>
-                  <a href="#" className="hover:text-foreground transition-colors">
+                  <a
+                    href="https://github.com/extinctsion/devoice"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="hover:text-foreground transition-colors"
+                  >
                     GitHub
-                  </a>
-                </li>
-                <li>
-                  <a href="#" className="hover:text-foreground transition-colors">
-                    API Reference
-                  </a>
-                </li>
-                <li>
-                  <a href="#" className="hover:text-foreground transition-colors">
-                    Status
                   </a>
                 </li>
               </ul>
