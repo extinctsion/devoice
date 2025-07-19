@@ -791,37 +791,6 @@ export default function DevVoiceLanding() {
               intelligent coding assistance
             </p>
           </div>
-
-          <div className="max-w-4xl mx-auto">
-            <Card className="p-6">
-              <div className="bg-slate-900 rounded-lg p-6 overflow-x-auto">
-                <pre className="text-green-400 text-sm">
-                  <code>{`// AssemblyAI Integration
-import { AssemblyAI } from 'assemblyai'
-
-const client = new AssemblyAI({
-  apiKey: process.env.ASSEMBLYAI_API_KEY
-});
-
-// Transcribe audio
-const transcript = await client.transcripts.transcribe({
-  audio: audioFile,
-  speech_model: 'best'
-});
-
-// Cohere Integration
-import { generateText } from 'ai'
-import { cohere } from '@ai-sdk/cohere'
-
-const { text } = await generateText({
-  model: cohere('command-r-plus'),
-  prompt: transcript.text,
-  system: "You are DevVoice, an AI coding assistant..."
-});`}</code>
-                </pre>
-              </div>
-            </Card>
-          </div>
         </div>
       </section>
 
